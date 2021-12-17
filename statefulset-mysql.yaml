@@ -1,0 +1,286 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysql
+spec:
+  selector:
+    matchLabels:
+      # 所有label为mysql的pod接收statefulset的调度
+      app: mysql
+  serviceName: mysql
+  # 每个mysql pod有3个replica
+  replicas: 3
+  template:
+    metadata:
+      labels:
+        app: mysql
+    spec:
+      # 初始化容器用`initContainers`标记、将会在container前执行initContainer
+      initContainers:
+      - name: init-mysql
+        # 初始化容器内的第一个镜像：mysql:5.7代号init-mysql
+        image: mysql:5.7
+        # 镜像初始化时执行shell命令
+        # 用法:bash -c "cmd string" 和 bash xxx.sh有细微差别
+        # diff see:https://www.jianshu.com/p/198d819d24d1
+        command:
+        - bash
+        - "-c"
+        # Q: | 表示什么意思？
+        - |
+
+          # shell 解读:
+          # -e若指令传回值不等于0直接退出shell
+          # 执行指令会显示该指令及下边的参数
+
+          set -ex
+
+          # Generate mysql server-id from pod ordinal index.
+          # 所以server-id是根据pod的序号索引来生成的
+
+          # if 左边表达式匹配或者直接退出1、会导致-e直接退出shell
+          # Q: hostname带上斜引号是获取pod主机名？
+          [[ `hostname` =~ -([0-9]+)$ ]] || exit 1
+
+          # BASH_REMATCH是个正则匹配成功的返回
+          ordinal=${BASH_REMATCH[1]}
+
+          # 向server-id.cnf中输入[mysqld]
+          echo [mysqld] > /mnt/conf.d/server-id.cnf
+
+          # Add an offset to avoid reserved server-id=0 value.
+          # offset = 100
+          # 注意shell字符串拼接和常量再生成变量的格式
+          echo server-id=$((100 + $ordinal)) >> /mnt/conf.d/server-id.cnf
+
+          # 经过操作后server-id.cnf中就会有如下内容，示例：
+          # [mysqld]
+          # server-id=101
+
+          # Copy appropriate conf.d files from config-map to emptyDir.
+          # 将挂载的volume ConfigMap资源对象拷贝到目录下
+
+          if [[ $ordinal -eq 0 ]]; then
+            # shell判断master节点
+            # 将目录/mnt/config-map/下的master.cnf拷贝到pod下的/mnt/conf.d目录下
+            cp /mnt/config-map/master.cnf /mnt/conf.d/
+          else
+            # shell判断是其他slave节点、依样拷贝slave.cnf文件
+            cp /mnt/config-map/slave.cnf /mnt/conf.d/
+          fi
+
+        # 当前初始化容器需要2个挂载点目录、shell脚本需要操作这两个目录
+        volumeMounts:
+        - name: conf
+          # 名为conf挂载点是目录/mnt/conf.d、这个目录是写server-id.cnf文件用的
+          mountPath: /mnt/conf.d
+        - name: config-map
+          # 名为config-map挂载点是/mnt/config-map目录
+          # 注意，因为是ConfigMap资源、所以/mnt/config-map下已有master.cnf和slave.cnf两个配置文件了!
+          mountPath: /mnt/config-map
+
+      - name: clone-mysql
+        # 初始化容器内的第二个镜像：xtrabackup:1.0代号clone-mysql
+        # 这是一个开源的MySQL拷贝工具:
+        # See its doc: https://www.percona.com/doc/percona-xtrabackup/LATEST/index.html#installation
+        image: gcr.io/google-samples/xtrabackup:1.0
+
+        # 镜像初始化时执行shell命令
+        command:
+        - bash
+        - "-c"
+        - |
+          set -ex
+          # Skip the clone if data already exists.
+          # 原来有数据就退出拷贝shell
+          # if [[ -d /var/lib/mysql/mysql ]] && exit 0 的简写
+          [[ -d /var/lib/mysql/mysql ]] && exit 0
+
+          # Skip the clone on master (ordinal index 0).
+          # master序号为0，master不做克隆
+          [[ `hostname` =~ -([0-9]+)$ ]] || exit 1
+
+          # 正则匹配一个slave的序号
+          ordinal=${BASH_REMATCH[1]}
+          [[ $ordinal -eq 0 ]] && exit 0
+
+          # Clone data from previous peer.
+          # slave 从别的端点拷贝mysql数据
+          # Ncat 是用于在网络上读取，写入，重定向和加密数据的通用命令行工具，有点类似nc
+          # 管道给到xbstream、将MySQL数据拷贝到/var/lib/mysql下
+          ncat --recv-only mysql-$(($ordinal-1)).mysql 3307 | xbstream -x -C /var/lib/mysql
+
+          # Prepare the backup.
+          # 使用xtrabackup将拷贝过来的MySQL数据解压并准备好
+          xtrabackup --prepare --target-dir=/var/lib/mysql
+
+        volumeMounts:
+          # 第二个初始化镜像需要2个挂载点目录：/var/lib/mysql和/etc/mysql/conf.d
+          # 以便初始化时能基于这两个挂载目录进行操作
+          # PV是持久化的、不随Pod消亡而消失、因此可能/var/lib/mysql下有内容的
+          # 所以/mysql第四级目录是xtrabackup拷贝出来的、也是mysql运行后会生成或使用的数据目录!
+        - name: data
+          mountPath: /var/lib/mysql
+          # Q: subPath是什么标记
+          subPath: mysql
+
+          # Q: 原MySQL镜像目录/etc/mysql/conf.d里边有些什么文件?
+        - name: conf
+          mountPath: /etc/mysql/conf.d
+
+      containers:
+        # 真正的MySQL容器
+      - name: mysql
+        # 镜像mysql:5.7
+        image: mysql:5.7
+        env:
+        - name: MYSQL_ALLOW_EMPTY_PASSWORD
+          value: "1"
+        ports:
+        - name: mysql
+          containerPort: 3306
+
+        volumeMounts:
+          # 容器挂载点2个目录：/var/lib/mysql和/etc/mysql/conf.d
+          # 当容器初始化时及以后需要操作这两个目录
+        - name: data
+          mountPath: /var/lib/mysql
+          subPath: mysql
+        - name: conf
+          mountPath: /etc/mysql/conf.d
+
+        resources:
+          requests:
+            cpu: 500m
+            memory: 1Gi
+        livenessProbe:
+          exec:
+            command: ["mysqladmin", "ping"]
+          # 探活使用mysqladmin ping节点，延迟30秒执行、等initContainer执行完
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+        readinessProbe:
+          exec:
+            # Check we can execute queries over TCP (skip-networking is off).
+            # 读取探活用mysql -h -e 进行连接执行
+            command: ["mysql", "-h", "127.0.0.1", "-e", "SELECT 1"]
+          # 5秒延迟
+          initialDelaySeconds: 5
+          periodSeconds: 2
+          timeoutSeconds: 1
+
+        # 容器里的第二个镜像
+      - name: xtrabackup
+        image: gcr.io/google-samples/xtrabackup:1.0
+        ports:
+        - name: xtrabackup
+          containerPort: 3307
+
+        # 容器初始化时执行shell命令
+        command:
+        - bash
+        - "-c"
+        - |
+          set -ex
+
+          # 进入MySQL数据资源目录、准备-f查看文件资源是否存在
+          cd /var/lib/mysql
+
+          # Determine binlog position of cloned data, if any.
+          # 如果有克隆数据、查看binlog的位置、如果-f file存在且是一个普通文件则为真
+
+          if [[ -f xtrabackup_slave_info && "x$(<xtrabackup_slave_info)" != "x" ]]; then
+            # XtraBackup already generated a partial "CHANGE MASTER TO" query
+            # because we're cloning from an existing slave. (Need to remove the tailing semicolon!)
+
+            # 输出slave备份信息
+            cat xtrabackup_slave_info | sed -E 's/;$//g' > change_master_to.sql.in
+
+            # Ignore xtrabackup_binlog_info in this case (it's useless).
+            # 删除并忽略无用的slave和binlog信息
+            rm -f xtrabackup_slave_info xtrabackup_binlog_info
+
+          elif [[ -f xtrabackup_binlog_info ]]; then
+            # 如果只有binlog信息文件
+            # We're cloning directly from master. Parse binlog position.
+            # 从master克隆需要解析binlog的位置
+
+            # 正则匹配binglog信息
+            [[ `cat xtrabackup_binlog_info` =~ ^(.*?)[[:space:]]+(.*?)$ ]] || exit 1
+
+            # 删除并忽略无用的slave和binlog信息
+            rm -f xtrabackup_binlog_info xtrabackup_slave_info
+
+            # 将正则匹配的log文件和position写入change_master_to.sql.in
+            # Q: change_master_to.sql.in是什么文件，xtrabackup的还是mysql的？
+            echo "CHANGE MASTER TO MASTER_LOG_FILE='${BASH_REMATCH[1]}',\
+                  MASTER_LOG_POS=${BASH_REMATCH[2]}" > change_master_to.sql.in
+          fi
+
+          # Check if we need to complete a clone by starting replication.
+          # 校验是否要开启一个复制做克隆
+
+          if [[ -f change_master_to.sql.in ]]; then
+            # 如果有change_master_to.sql.in文件
+
+            # 不断使用mysql -h -e执行探活、沉睡1秒、再输出等待mysqld be ready..
+            echo "Waiting for mysqld to be ready (accepting connections)"
+            until mysql -h 127.0.0.1 -e "SELECT 1"; do sleep 1; done
+
+            # mysqld ok了输出初始化复制
+            echo "Initializing replication from clone position"
+
+            # 执行mysql -h -e 命令
+            # <change_master_to.sql.in conf; start slave;>这样的命令，就会开启主从binlog复制
+
+            mysql -h 127.0.0.1 \
+                  -e "$(<change_master_to.sql.in), \
+                          MASTER_HOST='mysql-0.mysql', \
+                          MASTER_USER='root', \
+                          MASTER_PASSWORD='', \
+                          MASTER_CONNECT_RETRY=10; \
+                        START SLAVE;" || exit 1
+
+            # In case of container restart, attempt this at-most-once.
+            # 如果容器重启，最多重试一次
+            mv change_master_to.sql.in change_master_to.sql.orig
+          fi
+
+          # Start a server to send backups when requested by peers.
+          # 开启xtrabackup服务端响应后续的端到端数据拷贝请求、这也是之前NCAT读取其他端MySQL数据的原理
+          exec ncat --listen --keep-open --send-only --max-conns=1 3307 -c \
+            "xtrabackup --backup --slave-info --stream=xbstream --host=127.0.0.1 --user=root"
+
+        volumeMounts:
+          # 容器配置2个目录的挂载点：/var/lib/mysql和/etc/mysql/conf.d
+          # 当容器初始化时需要对目录进行读写
+        - name: data
+          mountPath: /var/lib/mysql
+          subPath: mysql
+        - name: conf
+          mountPath: /etc/mysql/conf.d
+
+        resources:
+          requests:
+            cpu: 100m
+            memory: 100Mi
+      volumes:
+        # 挂载2个卷轴、conf名下直接是配置、config-map名下是有级联key的properties
+        # emptyDir是个空卷，当Pod开始运行时卷轴被创建被一直存在
+        # 这样的空卷类似于临时目录，当Pod被移除的时候也就不存在了，不像挂载到指定PVC下Pod退出可以共享数据。
+      - name: conf
+        emptyDir: {}
+      - name: config-map
+        configMap:
+          # ConfigMap资源卷轴读取configMap下key=mysql的配置properties
+          name: mysql
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 10Gi
+
