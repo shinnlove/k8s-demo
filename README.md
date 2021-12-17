@@ -101,6 +101,8 @@ service/tony-service created
 
 部署后详细信息：
 
+![k8s deployment](https://github.com/shinnlove/k8s-demo/blob/main/images/image_2.png "image_2")
+
 
 2.2 获取所有服务`kubectl get services`：
 
@@ -190,6 +192,7 @@ echo "this is charly from k8s running pods." >> hello.txt
 
 当前仓库里的版本：
 
+![current repo version](https://github.com/shinnlove/k8s-demo/blob/main/images/image_3.png "image_3")
 
 当前latest版本是6666了，访问/hello/xxx可以输出.
 
@@ -199,7 +202,11 @@ echo "this is charly from k8s running pods." >> hello.txt
 docker tag shinnlove/springboot:latest shinnlove/springboot:v2021.1216.8888
 ```
 
+![docker local lastest image](https://github.com/shinnlove/k8s-demo/blob/main/images/image_4.png "image_4")
+
 将最新镜像push到远端Hub
+
+![docker remote lastest image](https://github.com/shinnlove/k8s-demo/blob/main/images/image_5.png "image_5")
 
 现在拥有6666和8888版本的两个springboot的jar了。
 
@@ -217,6 +224,7 @@ kubectl rollout status deployment/tony-deployment
 
 会发现k8s会逐个更新集群
 
+![k8s rollout deployment](https://github.com/shinnlove/k8s-demo/blob/main/images/image_6.png "image_6")
 
 检查所有部署的版本：
 
@@ -224,11 +232,15 @@ kubectl rollout status deployment/tony-deployment
 kubectl rollout history deployment.v1.apps/tony-deployment
 ```
 
+![k8s rollout history](https://github.com/shinnlove/k8s-demo/blob/main/images/image_7.png "image_7")
+
 查看某个历史版本：
 
 ```shell
 kubectl rollout history deployment.v1.apps/tony-deployment --revision=5
 ```
+
+![rollback to specific version](https://github.com/shinnlove/k8s-demo/blob/main/images/image_8.png "image_8")
 
 回滚到上一个版本：
 
@@ -247,9 +259,11 @@ kubectl rollout undo deployment.v1.apps/tony-deployment --to-revision=5
 
 5版本：
 
+![version 5](https://github.com/shinnlove/k8s-demo/blob/main/images/image_9.png "image_9")
 
 6版本：
 
+![version 6](https://github.com/shinnlove/k8s-demo/blob/main/images/image_10.png "image_10")
 
 特别注意，如果在不同版本之间不停回滚，最后回滚后的版本id会升级、原来的版本会不存在。
 
