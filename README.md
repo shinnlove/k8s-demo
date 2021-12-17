@@ -78,7 +78,7 @@ docker push shinnlove/springboot:latest
 
 然后就可以在Hub上找到自己的镜像了。
 
-[!docker hub images](https://github.com/shinnlove/k8s-demo/blob/main/images/image_1.png "image_1")
+![docker hub images](https://github.com/shinnlove/k8s-demo/blob/main/images/image_1.png "image_1")
 
 
 2.定义容器目录与服务端目录挂载
